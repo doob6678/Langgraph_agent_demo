@@ -33,7 +33,7 @@ search_service = SearchService()
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     # 启动时初始化
-    print("正在初始化服务...")
+    print("正在初始化服务... [VERSION: ImageMarkdownBuffer ENABLED]")
     
     # 测试Milvus连接
     try:
@@ -66,6 +66,8 @@ app = FastAPI(
 
 # 挂载静态文件
 app.mount("/static", StaticFiles(directory="backend/static"), name="static")
+app.mount("/frontend", StaticFiles(directory="frontend"), name="frontend")
+# 图像显示位置
 _default_assets_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "image_search", "img_marcus"))
 _assets_dir = (os.getenv("ASSETS_DIR") or _default_assets_dir).strip()
 if _assets_dir and os.path.isdir(_assets_dir):
@@ -140,137 +142,13 @@ def _normalize_tool_calls_for_stream(tool_calls: Any) -> List[Dict[str, Any]]:
     return normalized
 
 async def _stream_chat_response(state: Any, start_time: float):
-    from backend.agent import graph_new_real as g
-
+    from backend.agent.stream_ex.graph_stream_impl import stream_chat_graph
+    
     chat_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
-    model = "unknown"
-
-    yield _sse_data(_openai_chunk(chat_id, created, model, {"role": "assistant"}))
-
-    if not g._should_force_rule_based():
-        try:
-            for obj in g.stream_chat_with_tools(state, chat_id=chat_id, created=created):
-                if isinstance(obj, dict) and obj.get("object") == "chat.completion.chunk":
-                    model = obj.get("model") or model
-                yield _sse_data(obj)
-
-            answer = (getattr(state, "answer", "") or "").strip()
-            yield _sse_data(_openai_chunk(chat_id, created, model, {}, finish_reason="stop"))
-
-            total_time = time.time() - start_time
-            timing = dict(getattr(state, "timing", None) or {})
-            timing["total_time"] = float(total_time)
-
-            metadata = dict(getattr(state, "metadata", None) or {})
-            usage = metadata.get("usage")
-            if not isinstance(usage, dict):
-                usage = {
-                    "prompt_tokens": _estimate_tokens(getattr(state, "user_input", "") or ""),
-                    "completion_tokens": _estimate_tokens(answer),
-                    "total_tokens": _estimate_tokens((getattr(state, "user_input", "") or "") + answer),
-                }
-
-            x_final = {
-                "response": answer,
-                "images": list(getattr(state, "images", None) or []),
-                "search_results": list(getattr(state, "search_results", None) or []),
-                "timing": timing,
-                "metadata": metadata,
-            }
-
-            yield _sse_data(
-                {
-                    "id": chat_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [],
-                    "usage": usage,
-                    "x_final": x_final,
-                }
-            )
-            yield _sse_done()
-            return
-        except Exception:
-            pass
-
-    max_steps = 12
-    step = 0
-    while step < max_steps:
-        step += 1
-        state = g.agent_node(state)
-        model = (getattr(state, "metadata", None) or {}).get("model") or model
-        if getattr(state, "needs_tool", False) and getattr(state, "tool_calls", None):
-            tool_calls = _normalize_tool_calls_for_stream(getattr(state, "tool_calls", None))
-            if tool_calls:
-                yield _sse_data(_openai_chunk(chat_id, created, model, {"tool_calls": tool_calls}))
-            for tc in list(getattr(state, "tool_calls", []) or []):
-                tool_event = g._execute_tool_call_into_state(state, tc)
-                slim = dict(tool_event or {})
-                if "result" in slim:
-                    r = str(slim.get("result") or "")
-                    if len(r) > 800:
-                        r = r[:800] + "..."
-                    slim["result_preview"] = r
-                    slim.pop("result", None)
-                yield _sse_data(
-                    {
-                        "id": chat_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [],
-                        "x_tool_event": slim,
-                    }
-                )
-            state.tool_calls = []
-            state.needs_tool = False
-            continue
-        if getattr(state, "answer", ""):
-            break
-
-    answer = (getattr(state, "answer", "") or "").strip()
-    for i in range(0, len(answer), 24):
-        part = answer[i : i + 24]
-        if part:
-            yield _sse_data(_openai_chunk(chat_id, created, model, {"content": part}))
-
-    yield _sse_data(_openai_chunk(chat_id, created, model, {}, finish_reason="stop"))
-
-    total_time = time.time() - start_time
-    timing = dict(getattr(state, "timing", None) or {})
-    timing["total_time"] = float(total_time)
-
-    metadata = dict(getattr(state, "metadata", None) or {})
-    usage = metadata.get("usage")
-    if not isinstance(usage, dict):
-        usage = {
-            "prompt_tokens": _estimate_tokens(getattr(state, "user_input", "") or ""),
-            "completion_tokens": _estimate_tokens(answer),
-            "total_tokens": _estimate_tokens((getattr(state, "user_input", "") or "") + answer),
-        }
-
-    x_final = {
-        "response": answer,
-        "images": list(getattr(state, "images", None) or []),
-        "search_results": list(getattr(state, "search_results", None) or []),
-        "timing": timing,
-        "metadata": metadata,
-    }
-
-    yield _sse_data(
-        {
-            "id": chat_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [],
-            "usage": usage,
-            "x_final": x_final,
-        }
-    )
-    yield _sse_done()
+    
+    async for chunk in stream_chat_graph(state, chat_id, created):
+        yield chunk
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
@@ -308,8 +186,7 @@ async def chat_endpoint(
             user_input=text,
             image_data=image_data,
             image_filename=image_filename,
-            use_rag=use_rag,
-            use_search=use_search,
+            tool_flags=[bool(use_rag), bool(use_search)],
             top_k=top_k
         )
 
@@ -320,6 +197,7 @@ async def chat_endpoint(
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
 
+        # 同步调用逻辑
         result = agent_graph.invoke(state)
         response = ChatResponse(
             response=result.get("answer", ""),
@@ -360,8 +238,7 @@ async def chat_with_image_endpoint(
             user_input=message,
             image_data=image_data,
             image_filename=image.filename,
-            use_rag=use_rag,
-            use_search=use_search,
+            tool_flags=[bool(use_rag), bool(use_search)],
             top_k=top_k
         )
 
@@ -396,7 +273,6 @@ async def get_config():
     from backend.agent import graph_new_real as g
 
     cfg = g.configure_ark()
-    cfg["agent_mode"] = (os.getenv("AGENT_MODE") or "").strip()
     return cfg
 
 @app.post("/api/config")
@@ -404,22 +280,10 @@ async def set_config(
     ark_api_key: Optional[str] = Form(None),
     ark_base_url: Optional[str] = Form(None),
     ark_model: Optional[str] = Form(None),
-    agent_mode: Optional[str] = Form(None),
 ):
     from backend.agent import graph_new_real as g
 
-    if agent_mode is not None:
-        mode = (agent_mode or "").strip()
-        if mode:
-            os.environ["AGENT_MODE"] = mode
-        else:
-            try:
-                os.environ.pop("AGENT_MODE", None)
-            except Exception:
-                pass
-
     cfg = g.configure_ark(api_key=ark_api_key, base_url=ark_base_url, model=ark_model)
-    cfg["agent_mode"] = (os.getenv("AGENT_MODE") or "").strip()
     return cfg
 
 @app.get("/api/health")
@@ -453,7 +317,7 @@ async def health_check():
 async def get_image(image_id: str):
     """获取图片"""
     try:
-        # 这里应该实现从Milvus获取图片的逻辑
+        # TODO 这里应该实现从Milvus获取图片的逻辑
         # 暂时返回404
         raise HTTPException(status_code=404, detail="图片未找到")
     except Exception as e:

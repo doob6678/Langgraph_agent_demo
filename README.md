@@ -88,10 +88,21 @@
 `frontend/index.html` 使用 `fetch` + `ReadableStream` 逐行解析 SSE：
 
 - 逐步拼接 `delta.content` 为 Markdown 源文本，并用 `requestAnimationFrame` 节流渲染，避免页面卡死
-- 实时展示：
+- 实时展示中间状态与工具调用（折叠/展开式交互）：
+  - 动态创建 `thoughts-container`，用于收纳大语言模型最终回答前的中间输出（思考过程）和工具调用执行细节
+  - 实时显示正在使用的工具及其具体参数（如 `web_search (query: "...")`）
+  - 工具调用完成时，动态展示结果预览（如搜索到的图片直接展示为小缩略图，并支持点击放大）
+  - 流式输出结束时，自动折叠思考过程区域，使用户焦点回到最终生成的回答上，用户亦可随时点击头部展开查看过程
   - `tool_calls`：模型计划调用的工具与参数（OpenAI tool_calls 结构）
   - `x_tool_event`：每次工具执行的 `ok/elapsed_s/result_preview`
   - `usage`：`prompt_tokens/completion_tokens/total_tokens`（若上游不提供则后端估算并在最终事件返回）
+
+## 4. 图搜图与Markdown图片渲染（新增功能）
+
+- **图搜图（Image to Image Search）**：用户上传图片后，系统会自动调用 `analyze_image` 提取 CLIP 图像特征，并结合 `rag_image_search` 工具在 Milvus 向量库中检索相似图片，并根据特征提供准确的文本描述和推荐。整个过程支持流式实时反馈。
+- **严格图片渲染与格式修复**：
+  - **后端限定**：系统提示词严格要求大模型输出 `![图片名称](图片完整名称.png)` 格式。
+  - **前端容错修复**：由于大语言模型在输出 markdown 格式时常存在格式不稳定问题（如缺失右括号 `)`、图片名带多余空格、或缺失 `.png/.jpg` 后缀），前端的 `script.js` 增加了正则容错修复逻辑。在向 `marked.js` 渲染前，统一修复为标准 Markdown 图片格式，确保页面正常展示不出现“残缺括号”等排版错乱。
 
 ## 3. 本地验证
 
