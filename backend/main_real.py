@@ -64,8 +64,8 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# 挂载静态文件
-app.mount("/static", StaticFiles(directory="backend/static"), name="static")
+# TODO 这个根本没用 挂载静态文件
+# app.mount("/static", StaticFiles(directory="backend/static"), name="static")
 app.mount("/frontend", StaticFiles(directory="frontend"), name="frontend")
 # 图像显示位置
 _default_assets_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "image_search", "img_marcus"))
