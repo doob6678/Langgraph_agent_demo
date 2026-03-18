@@ -1,5 +1,6 @@
 import io
 import base64
+import os
 from typing import Optional, Dict, Any
 from PIL import Image
 import numpy as np
@@ -10,10 +11,34 @@ class ImageService:
     def __init__(self):
         self.max_size = (1024, 1024)  # 最大图片尺寸
         self.quality = 85  # JPEG质量
+        self.max_file_size_bytes = 10 * 1024 * 1024  # 10MB
+        self.max_filename_length = 128
         
     def process_uploaded_image(self, image_data: bytes, filename: str) -> Dict[str, Any]:
         """处理上传的图片"""
         try:
+            # 1. 检查文件名长度
+            if len(filename) > self.max_filename_length:
+                # 自动截断保留后缀
+                name_part, ext = os.path.splitext(filename)
+                # 确保保留后缀，截断文件名部分
+                allowed_name_len = self.max_filename_length - len(ext)
+                if allowed_name_len <= 0:
+                     return {
+                        "success": False,
+                        "error": f"文件名扩展名过长 (Max {self.max_filename_length} chars)",
+                        "message": "文件名无效"
+                    }
+                filename = name_part[:allowed_name_len] + ext
+
+            # 2. 检查文件大小
+            if len(image_data) > self.max_file_size_bytes:
+                return {
+                    "success": False,
+                    "error": f"图片大小超过限制 (Max {self.max_file_size_bytes / 1024 / 1024}MB)",
+                    "message": "图片过大"
+                }
+
             # 从字节数据创建图片
             image = Image.open(io.BytesIO(image_data))
             

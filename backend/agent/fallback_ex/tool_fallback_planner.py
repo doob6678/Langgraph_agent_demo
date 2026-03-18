@@ -112,6 +112,26 @@ class ToolFallbackPlanner:
                     },
                 }
             )
+            ql = (query or "").strip().lower()
+            should_save_image = any(x in ql for x in ["保存", "记住", "入库", "存图", "save image", "save"])
+            if should_save_image:
+                tool_calls.append(
+                    {
+                        "id": f"call_{ts}_save_img",
+                        "type": "function",
+                        "function": {
+                            "name": "save_user_image",
+                            "arguments": json.dumps(
+                                {
+                                    "description": "",
+                                    "visibility": getattr(state, "visibility", "private") or "private",
+                                    "dept_id": getattr(state, "dept_id", "default_dept") or "default_dept",
+                                },
+                                ensure_ascii=False,
+                            ),
+                        },
+                    }
+                )
 
         return tool_calls
 

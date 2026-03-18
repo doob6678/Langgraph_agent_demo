@@ -11,6 +11,8 @@ class ToolExecutionContext:
     web_search_invoke: Callable[[Dict[str, Any]], Any]
     web_read_invoke: Callable[[Dict[str, Any]], Any]
     analyze_image_invoke: Callable[[Dict[str, Any]], Any]
+    save_user_fact_invoke: Callable[[Dict[str, Any]], Any]
+    save_user_image_invoke: Callable[[Dict[str, Any]], Any]
     coerce_top_k: Callable[[Any, int, int, int], int]
     getenv: Callable[[str], Optional[str]] = os.getenv
 

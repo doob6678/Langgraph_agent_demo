@@ -3,6 +3,7 @@ import os
 from typing import Any, Dict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from backend.agent.config_ex.model_config import get_runtime_model_settings
 
 
 def safe_parse_tool_arguments(raw_args: Any) -> Dict[str, Any]:
@@ -41,17 +42,16 @@ def coerce_top_k(value: Any, default: int = 5, min_value: int = 1, max_value: in
 
 
 def get_langchain_chat_model(model: str, *, temperature: float, max_tokens: int, streaming: bool):
-    api_key = (os.getenv("ARK_API_KEY") or "").strip()
-    base_url = (os.getenv("ARK_BASE_URL") or os.getenv("ARK_API_BASE_URL") or os.getenv("ARK_API_BASE") or "").strip()
-    if not base_url:
-        base_url = "https://ark.cn-beijing.volces.com/api/v3"
+    settings = get_runtime_model_settings()
+    api_key = settings.get("api_key", "")
+    base_url = settings.get("base_url", "")
     try:
         from langchain_openai import ChatOpenAI  # type: ignore
     except Exception:
         from langchain.chat_models import ChatOpenAI  # type: ignore
 
     return ChatOpenAI(
-        model_name=model,
+        model_name=(model or settings.get("base_model") or "").strip(),
         openai_api_key=api_key,
         openai_api_base=base_url,
         temperature=float(temperature),

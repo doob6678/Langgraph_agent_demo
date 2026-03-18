@@ -19,8 +19,22 @@ class AgentState:
     needs_tool: bool = False
     current_tool: str = ""
     tool_results: Dict[str, Any] = None
+    
+    # Memory related fields
+    memory_context: str = ""
+    memory_data: Dict[str, Any] = None
+    user_id: Optional[str] = None
+    dept_id: str = "default_dept"
+    visibility: str = "private"
 
     def __post_init__(self):
+        if self.user_id is None:
+             # 安全兜底：如果外部未传入，生成一个临时 ID
+             import uuid
+             self.user_id = f"anon_{uuid.uuid4().hex[:8]}"
+        if self.dept_id is None:
+             self.dept_id = "default_dept"
+
         if self.tool_flags is None:
             self.tool_flags = [True, True]
         else:

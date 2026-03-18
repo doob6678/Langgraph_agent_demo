@@ -2,18 +2,23 @@ import os
 import time
 from typing import List, Dict, Any, Optional
 import numpy as np
+import warnings
 from pymilvus import Collection, connections, utility
 
 class MilvusService:
-    """Milvus向量数据库服务"""
+    """
+    [Deprecated] Milvus向量数据库服务
+    请使用 backend.agent.memory_ex.memory_manager.MemoryManager 替代
+    """
     
     def __init__(self):
+        warnings.warn("MilvusService is deprecated. Use MemoryManager instead.", DeprecationWarning, stacklevel=2)
         self.host = os.getenv("MILVUS_HOST", "127.0.0.1")
         self.port = int(os.getenv("MILVUS_PORT", "19530"))
         self.user = os.getenv("MILVUS_USER", "root")
         self.password = os.getenv("MILVUS_PASSWORD", "")
         self.db_name = os.getenv("MILVUS_DB", "web_rag_demo_01")
-        self.collection_name = os.getenv("MILVUS_COLLECTION", "image_embeddings")
+        self.collection_name = os.getenv("IMAGE_MEMORY_COLLECTION", os.getenv("MILVUS_COLLECTION", "agent_image_memory"))
         
         # 连接Milvus
         self.connect()

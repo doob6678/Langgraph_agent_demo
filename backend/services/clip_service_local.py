@@ -73,6 +73,11 @@ class CLIPService:
             raise RuntimeError("empty CLIP_MODEL")
         if os.path.isdir(m):
             return m
+        cache_dir = (os.getenv("MODELSCOPE_CACHE_DIR") or "").strip()
+        if cache_dir:
+            local_candidate = os.path.join(cache_dir, *m.split("/"))
+            if os.path.isdir(local_candidate):
+                return local_candidate
         return snapshot_download(m)
 
     def _init_embedder(self) -> _Embedder:
@@ -218,15 +223,12 @@ class CLIPService:
         }
 
 
-_use_mock = (os.getenv("CLIP_USE_MOCK") or "").strip().lower() in ("1", "true", "yes", "y")
-if _HAS_MODELSCOPE and not _use_mock:
-    clip_service = CLIPService(
-        model_ref=os.getenv("CLIP_MODEL", None),
-        device=os.getenv("CLIP_DEVICE", None),
-    )
-else:
-    from backend.services.clip_service_mock import clip_service as clip_service
-    if not hasattr(clip_service, "is_loaded"):
-        def is_loaded() -> bool:
-            return True
-        setattr(clip_service, "is_loaded", is_loaded)
+if (os.getenv("CLIP_USE_MOCK") or "").strip().lower() in ("1", "true", "yes", "y"):
+    raise RuntimeError("CLIP_USE_MOCK 已被禁用，禁止使用任何 Mock CLIP 实现。")
+if not _HAS_MODELSCOPE:
+    raise RuntimeError("ModelScope CLIP 依赖不可用，无法初始化真实 CLIP 服务。")
+
+clip_service = CLIPService(
+    model_ref=os.getenv("CLIP_MODEL", None),
+    device=os.getenv("CLIP_DEVICE", None),
+)

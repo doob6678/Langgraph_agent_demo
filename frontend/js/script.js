@@ -89,6 +89,25 @@ document.addEventListener('paste', (e) => {
 });
 
 function handleImageFile(file) {
+    if (!file) return;
+
+    // Validation: Max size 10MB
+    const MAX_SIZE = 10 * 1024 * 1024;
+    if (file.size > MAX_SIZE) {
+        alert('图片大小不能超过 10MB');
+        // Clear input if it was from input
+        document.getElementById('image-input').value = '';
+        return;
+    }
+
+    // Validation: Max filename length 128
+    const MAX_NAME_LENGTH = 128;
+    if (file.name.length > MAX_NAME_LENGTH) {
+        alert(`文件名长度不能超过 ${MAX_NAME_LENGTH} 个字符`);
+        document.getElementById('image-input').value = '';
+        return;
+    }
+
     selectedFile = file;
     const reader = new FileReader();
     reader.onload = function(e) {
@@ -129,6 +148,15 @@ chatForm.addEventListener('submit', async (e) => {
         formData.append('use_search', useSearch.checked);
         formData.append('stream', 'true');
         
+        // Get Permission Fields
+        const userId = document.getElementById('user-id').value || 'default_user';
+        const deptId = document.getElementById('dept-id').value || 'default_dept';
+        const visibility = document.getElementById('visibility').value || 'private';
+
+        formData.append('user_id', userId);
+        formData.append('dept_id', deptId);
+        formData.append('visibility', visibility);
+        
         if (selectedFile) {
             formData.append('image', selectedFile);
         }
@@ -138,8 +166,28 @@ chatForm.addEventListener('submit', async (e) => {
             body: formData
         });
 
-        if (!response.ok) throw new Error('Network response was not ok');
+        if (!response.ok) {
+            const errorText = await response.text();
+            let detail = errorText;
+            let code = '';
+            let requestId = '';
+            try {
+                const parsed = JSON.parse(errorText);
+                if (parsed && typeof parsed === 'object') {
+                    detail = parsed.detail || parsed.message || errorText;
+                    code = String(parsed.code || '').trim();
+                    requestId = String(parsed.request_id || '').trim();
+                }
+            } catch (_) {}
+            const finalDetail = String(detail || '').trim();
+            const codePart = code ? ` [${code}]` : '';
+            const reqPart = requestId ? ` (request_id=${requestId})` : '';
+            throw new Error(finalDetail ? `HTTP ${response.status}${codePart}: ${finalDetail}${reqPart}` : `HTTP ${response.status}${codePart}${reqPart}`);
+        }
 
+        if (!response.body) {
+            throw new Error('响应体为空，无法读取流式数据');
+        }
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         
@@ -171,6 +219,7 @@ chatForm.addEventListener('submit', async (e) => {
         removeImage();
 
         let buffer = '';
+        let streamStoppedByError = false;
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
@@ -183,13 +232,38 @@ chatForm.addEventListener('submit', async (e) => {
                 const trimmedLine = line.trim();
                 if (trimmedLine.startsWith('data: ')) {
                     const dataStr = trimmedLine.slice(6);
-                    if (dataStr === '[DONE]') continue;
+                    if (dataStr === '[DONE]') {
+                        if (streamStoppedByError) {
+                            break;
+                        }
+                        continue;
+                    }
                     
                     try {
                         const data = JSON.parse(dataStr);
+                        if (data.x_error) {
+                            const xerr = data.x_error || {};
+                            const errCode = String(xerr.code || 'STREAM_ERROR').trim();
+                            const errMessage = String(xerr.message || '流式请求失败').trim();
+                            const errDetailRaw = xerr.detail;
+                            const errDetail = typeof errDetailRaw === 'string' ? errDetailRaw.trim() : JSON.stringify(errDetailRaw || {});
+                            const errRequestId = String(xerr.request_id || response.headers.get('x-request-id') || '').trim();
+                            streamStoppedByError = true;
+                            try {
+                                await reader.cancel();
+                            } catch (_) {}
+                            throw new Error(`[${errCode}] ${errMessage}${errDetail ? `: ${errDetail}` : ''}${errRequestId ? ` (request_id=${errRequestId})` : ''}`);
+                        }
+                        
+                        // Handle Memory Events
+                        if (data.x_memory_event && typeof renderMemory === 'function') {
+                            console.log("Received x_memory_event:", data.x_memory_event);
+                            renderMemory(data.x_memory_event);
+                        }
                         
                         // Handle Tool Events
                         if (data.x_tool_event) {
+                            console.log("Received x_tool_event:", data.x_tool_event);
                             thoughtsContainer.style.display = 'block';
                             const event = data.x_tool_event;
                             const toolName = event.tool;
@@ -231,6 +305,9 @@ chatForm.addEventListener('submit', async (e) => {
                                 `;
                                 thoughtsContent.appendChild(statusItem);
                             } else if (event.status === 'completed') {
+                                if (toolName === 'save_user_fact' && typeof loadLongTermFacts === 'function') {
+                                    loadLongTermFacts(true);
+                                }
                                 // Find the last running tool with this name
                                 const items = thoughtsContent.querySelectorAll(`[data-tool="${toolName}"]`);
                                 let statusItem = null;
@@ -334,9 +411,85 @@ chatForm.addEventListener('submit', async (e) => {
         if (messagesDiv.contains(typingIndicator)) {
             messagesDiv.removeChild(typingIndicator);
         }
-        addMessage('抱歉，发生了一些错误。', 'assistant');
+        const errorMessage = error instanceof Error ? error.message : String(error || '未知错误');
+        addMessage(`请求失败：${errorMessage}`, 'assistant');
     } finally {
         submitBtn.disabled = false;
         userInput.focus();
     }
 });
+
+const cfgProviderInput = document.getElementById('cfg-provider');
+const cfgBaseModelInput = document.getElementById('cfg-base-model');
+const cfgBaseUrlInput = document.getElementById('cfg-base-url');
+const cfgBaseApiKeyInput = document.getElementById('cfg-base-api-key');
+const cfgLoadBtn = document.getElementById('cfg-load-btn');
+const cfgSaveBtn = document.getElementById('cfg-save-btn');
+const cfgStatus = document.getElementById('cfg-status');
+
+function setCfgStatus(text, isError = false) {
+    if (!cfgStatus) return;
+    cfgStatus.textContent = text || '';
+    cfgStatus.className = `text-xs ${isError ? 'text-red-500' : 'text-gray-500'}`;
+}
+
+async function loadModelConfig() {
+    try {
+        setCfgStatus('读取中...');
+        const resp = await fetch('/api/config');
+        if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+        }
+        const cfg = await resp.json();
+        if (cfgProviderInput) cfgProviderInput.value = cfg.provider || '';
+        if (cfgBaseModelInput) cfgBaseModelInput.value = cfg.base_model || '';
+        if (cfgBaseUrlInput) cfgBaseUrlInput.value = cfg.base_url || '';
+        if (cfgBaseApiKeyInput) cfgBaseApiKeyInput.value = '';
+        setCfgStatus('已读取');
+    } catch (e) {
+        setCfgStatus(`读取失败: ${String(e?.message || e || 'unknown')}`, true);
+    }
+}
+
+async function saveModelConfig() {
+    try {
+        setCfgStatus('保存中...');
+        const form = new URLSearchParams();
+        form.set('provider', (cfgProviderInput?.value || '').trim());
+        form.set('base_model', (cfgBaseModelInput?.value || '').trim());
+        form.set('base_url', (cfgBaseUrlInput?.value || '').trim());
+        const keyVal = (cfgBaseApiKeyInput?.value || '').trim();
+        if (keyVal) {
+            form.set('base_api_key', keyVal);
+        }
+        const resp = await fetch('/api/config', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'
+            },
+            body: form.toString()
+        });
+        if (!resp.ok) {
+            const txt = await resp.text();
+            throw new Error(txt || `HTTP ${resp.status}`);
+        }
+        const cfg = await resp.json();
+        if (cfgProviderInput) cfgProviderInput.value = cfg.provider || '';
+        if (cfgBaseModelInput) cfgBaseModelInput.value = cfg.base_model || '';
+        if (cfgBaseUrlInput) cfgBaseUrlInput.value = cfg.base_url || '';
+        if (cfgBaseApiKeyInput) cfgBaseApiKeyInput.value = '';
+        setCfgStatus('保存成功');
+    } catch (e) {
+        setCfgStatus(`保存失败: ${String(e?.message || e || 'unknown')}`, true);
+    }
+}
+
+if (cfgLoadBtn) {
+    cfgLoadBtn.addEventListener('click', loadModelConfig);
+}
+if (cfgSaveBtn) {
+    cfgSaveBtn.addEventListener('click', saveModelConfig);
+}
+if (cfgProviderInput || cfgBaseModelInput || cfgBaseUrlInput || cfgBaseApiKeyInput) {
+    loadModelConfig();
+}

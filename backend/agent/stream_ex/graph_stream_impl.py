@@ -3,7 +3,8 @@ import time
 import uuid
 from typing import Any, Dict, Optional
 
-from backend.agent.graph_async import async_agent_graph
+from backend.agent.config_ex.model_config import get_runtime_model_settings
+from backend.agent.graph_new_real import agent_graph as async_agent_graph
 from backend.agent.state_ex.agent_state import AgentState
 from backend.agent.stream_ex.image_buffer import ImageMarkdownBuffer
 
@@ -23,7 +24,7 @@ def _sse_done() -> bytes:
     return b"data: [DONE]\n\n"
 
 async def stream_chat_graph(state: AgentState, chat_id: str, created: int):
-    model = "doubao-seed-2-0-lite-260215" # Default model
+    model = (get_runtime_model_settings().get("base_model") or "doubao-seed-2-0-lite-260215").strip()
     
     # Send initial role
     yield _sse_data(_openai_chunk(chat_id, created, model, {"role": "assistant"}))
@@ -87,6 +88,30 @@ async def stream_chat_graph(state: AgentState, chat_id: str, created: int):
             
         # Update final state from chain end
         elif kind == "on_chain_end":
+            # Capture Memory Recall Result
+            # print(f"[Stream] on_chain_end: {event.get('name')}")
+            if event["name"] == "memory_recall":
+                output = event["data"].get("output")
+                # print(f"[Stream] memory_recall output: {output}")
+                if output and isinstance(output, dict):
+                    memory_data = output.get("memory_data")
+                    memory_context = output.get("memory_context")
+                    
+                    # 无论是否有数据，都发送事件，确保前端能收到状态更新
+                    print(f"[Stream] Sending memory event keys: {memory_data.keys() if memory_data else 'None'}")
+                    yield _sse_data({
+                        "id": chat_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [],
+                        "x_memory_event": {
+                            "status": "completed",
+                            "data": memory_data,
+                            "context": memory_context
+                        }
+                    })
+
             # The top-level chain end event contains the final state
             if event["name"] == "LangGraph":
                 output = event["data"].get("output")

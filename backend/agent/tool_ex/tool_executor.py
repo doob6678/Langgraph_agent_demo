@@ -3,7 +3,10 @@ from typing import Any, Callable, Dict, List, Optional
 
 from backend.agent.tool_ex.analyze_image_strategy import AnalyzeImageStrategy
 from backend.agent.tool_ex.execution_context import ToolExecutionContext
+from backend.agent.tool_ex.image_result_utils import normalize_image_hits, summarize_image_hits
 from backend.agent.tool_ex.rag_image_search_strategy import RagImageSearchStrategy
+from backend.agent.tool_ex.save_user_fact_strategy import SaveUserFactStrategy
+from backend.agent.tool_ex.save_user_image_strategy import SaveUserImageStrategy
 from backend.agent.tool_ex.tool_strategy import ToolStrategy
 from backend.agent.tool_ex.web_read_strategy import WebReadStrategy
 from backend.agent.tool_ex.web_search_strategy import WebSearchStrategy
@@ -16,9 +19,11 @@ class ToolExecutor:
             WebSearchStrategy(),
             WebReadStrategy(),
             AnalyzeImageStrategy(),
+            SaveUserFactStrategy(),
+            SaveUserImageStrategy(),
         ]
 
-    def execute_tool_call_into_state(
+    async def execute_tool_call_into_state(
         self,
         state: Any,
         tool_call: Any,
@@ -48,7 +53,15 @@ class ToolExecutor:
             if strategy is None:
                 result = f"未知工具: {tool_name}"
             else:
-                result = strategy.execute(state, tool_args, ctx)
+                result = await strategy.execute(state, tool_args, ctx)
+                if tool_name in ("rag_image_search", "analyze_image"):
+                    images = normalize_image_hits(getattr(state, "images", None))
+                    text = str(result or "")
+                    if images and ("未找到相关图片" in text or "未在图库中找到相似图片" in text):
+                        title = f"找到{len(images)}条相关图片:"
+                        fixed = summarize_image_hits(images, title, max_items=5, include_content=True)
+                        if fixed:
+                            result = fixed
         except Exception as e:
             ok = False
             result = f"工具 {tool_name} 执行失败: {str(e)}"

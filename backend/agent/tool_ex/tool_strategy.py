@@ -6,5 +6,5 @@ from backend.agent.tool_ex.execution_context import ToolExecutionContext
 class ToolStrategy(Protocol):
     tool_name: str
 
-    def execute(self, state: Any, tool_args: Dict[str, Any], ctx: ToolExecutionContext) -> Any: ...
+    async def execute(self, state: Any, tool_args: Dict[str, Any], ctx: ToolExecutionContext) -> Any: ...
 

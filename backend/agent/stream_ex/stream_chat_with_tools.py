@@ -1,16 +1,16 @@
 import json
-import os
 import time
 from typing import Any, Dict, List, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
+from backend.agent.config_ex.model_config import get_runtime_model_settings
 from backend.agent.fallback_ex.tool_fallback_planner import ToolFallbackPlanner
 from backend.agent.state_ex.agent_state import AgentState
 from backend.agent.stream_ex.image_buffer import ImageMarkdownBuffer
 from backend.agent.stream_ex.openai_chunk_utils import merge_tool_call_delta, openai_chunk
 from backend.agent.tool_ex.state_tool_runner import execute_tool_call_into_state
-from backend.agent.tool_ex.tools import analyze_image, rag_image_search, web_read, web_search
+from backend.agent.tool_ex.tools import analyze_image, rag_image_search, save_user_fact, save_user_image, web_read, web_search
 from backend.agent.util_ex.common import coerce_top_k, get_langchain_chat_model
 
 
@@ -19,7 +19,8 @@ def stream_chat_with_tools(state: AgentState, chat_id: str, created: int, max_ro
     if not q and state.image_data:
         q = "请分析这张图片"
 
-    model = (os.getenv("ARK_MODEL") or os.getenv("ARK_MODEL_NAME") or "doubao-seed-2-0-lite-260215").strip()
+    model_settings = get_runtime_model_settings()
+    model = (model_settings.get("base_model") or "doubao-seed-2-0-lite-260215").strip()
     if not model:
         model = "doubao-seed-2-0-lite-260215"
 
@@ -38,6 +39,12 @@ def stream_chat_with_tools(state: AgentState, chat_id: str, created: int, max_ro
 4. analyze_image: 分析图片内容（使用CLIP模型）
    - 参数: image_data_base64 (str), description (str)
 
+5. save_user_fact: 保存用户长期事实记忆
+   - 参数: fact (str), visibility (private|department), dept_id (str)
+
+6. save_user_image: 保存当前会话上传图片到图片记忆库
+   - 参数: description (str), visibility (private|department), dept_id (str)
+
 使用规则：
 - 根据用户需求选择合适的工具
 - 可以组合使用多个工具
@@ -53,15 +60,17 @@ def stream_chat_with_tools(state: AgentState, chat_id: str, created: int, max_ro
         tools.append(web_read)
     if state.image_data:
         tools.append(analyze_image)
+        tools.append(save_user_image)
+    tools.append(save_user_fact)
 
     user_content = q
     if state.image_data:
-        user_content = f"{user_content}\n[用户上传了一张图片，请调用 analyze_image 工具进行分析。你可以直接传递空的 image_data_base64 参数，系统会自动处理]"
+        user_content = f"{user_content}\n[用户上传了一张图片，请先调用 analyze_image 工具做分析。只有当用户明确要求“记住/保存这张图”时，才调用 save_user_image 保存到图片记忆库。]"
 
     lc_messages: List[Any] = [SystemMessage(content=system_prompt), HumanMessage(content=user_content)]
     answer_parts: List[str] = []
 
-    api_key = (os.getenv("ARK_API_KEY") or "").strip()
+    api_key = (model_settings.get("api_key") or "").strip()
     if not api_key:
         fallback = ToolFallbackPlanner(coerce_top_k=coerce_top_k, execute_tool_call=execute_tool_call_into_state, openai_chunk=openai_chunk)
         if not (bool(getattr(state, "use_search", False)) or bool(getattr(state, "use_rag", False)) or bool(getattr(state, "image_data", None))):
