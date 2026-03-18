@@ -29,8 +29,8 @@
 
 ### 1.3 记忆系统（分层存储）
 
-- **短期记忆（Context）**：保存近期对话窗口，支持上下文连续性。
-- **长期记忆（Long-term）**：支持结构化事实持久化（Milvus + MySQL 扩展文本）。
+- **短期记忆（Context）**：保存近期对话窗口，支持上下文连续性（MySQL 会话侧）。
+- **长期记忆（Long-term）**：结构化事实仅写入 Milvus，单条记忆内容上限 1024 字符。
 - **图像记忆（Images）**：独立图像集合存储与查询，支持 ACL 可见性控制。
 - 新增并落地记忆分层元数据：`metadata.type`，当前已区分：
   - `fact`：事实层
@@ -38,7 +38,14 @@
   - `image_summary`：图像摘要层
 - Facts 页面默认仅展示事实层，避免图像摘要重复混入。
 
-### 1.4 搜索与网页阅读
+### 1.4 Embedding 与多模态模型
+
+- 文本 Embedding：`LocalEmbedding` 基于 ModelScope `sentence_embedding` 管线，默认模型 `damo/nlp_corom_sentence-embedding_chinese-base`。
+- 图像 Embedding：`CLIPService` 基于 `CLIPForMultiModalEmbedding`，默认模型 `damo/multi-modal_clip-vit-large-patch14_zh`。
+- 模型加载策略：支持本地缓存优先与延迟加载，服务启动阶段可预加载，降低首请求抖动。
+- 线程安全与边界兜底：CLIP 服务使用 `RLock` 保护模型推理，`TEXT_MAX_LEN`、分辨率与设备选择均有默认值与边界处理。
+
+### 1.5 搜索与网页阅读
 
 - 联网搜索支持多模式：
   - `ark`
@@ -48,7 +55,7 @@
 - 搜索失败可按策略回退（受 `WEB_SEARCH_STRICT` 控制）。
 - 支持网页正文读取与截断、并发控制、异常兜底。
 
-### 1.5 前端体验
+### 1.6 前端体验
 
 - Chat 流式打字机渲染。
 - 工具调用过程可视化（执行中/完成/结果预览）。
@@ -60,7 +67,7 @@
   - Facts 与 Images 使用独立缓存身份键，避免互相影响
   - 身份切换自动刷新对应面板
 
-### 1.6 可测试性与回归
+### 1.7 可测试性与回归
 
 - 提供统一测试入口 `tests/run_all.py`。
 - 支持自动拉起服务或复用外部运行服务（`--no-server`）。
@@ -76,7 +83,7 @@
 - Agent 编排：LangGraph
 - 模型接入：OpenAI Compatible API
 - 向量数据库：Milvus
-- 关系存储：MySQL（长文本扩展）
+- 关系存储：MySQL（短期会话与业务关系数据）
 - 多模态模型：CLIP（本地）
 - 前端：原生 JS + SSE 流式解析
 
@@ -86,8 +93,23 @@
 - `backend/agent/memory_ex/*`：短期/长期/图像记忆与统一管理器
 - `backend/agent/tool_ex/*`：工具策略与执行上下文
 - `backend/agent/stream_ex/*`：SSE 事件流封装与输出
+- `backend/common/error_handler.py`：全局异常处理器、中间件 request_id 注入与统一错误体
 - `frontend/js/script.js`：聊天流渲染、工具状态展示
 - `frontend/js/memory_ui.js`：记忆面板（Context/Facts/Images）
+
+### 2.3 设计模式落地
+
+- **策略模式（Strategy）**：`ToolExecutor` 通过 `tool_name` 路由到 `WebSearchStrategy`、`WebReadStrategy`、`AnalyzeImageStrategy`、`SaveUserFactStrategy` 等实现，新增工具只需新增策略类并注册。
+- **门面模式（Facade）**：`MemoryManager` 统一编排 `ShortTermMemory`、`LongTermMemory`、`ImageMemory`，对 Agent 层暴露单一记忆入口，隐藏底层差异与复杂性。
+- **工厂 + 单例初始化**：`MemoryManagerFactory` 负责全局管理器和共享 Embedding 的懒加载，避免重复初始化与并发抖动。
+- **防御式默认值**：策略执行中统一进行 `top_k`、参数解析、结果预览截断，降低异常输入导致的链路中断概率。
+
+### 2.4 全局异常处理与流式兜底
+
+- 统一异常注册：在 `main_real.py` 中集中注册 `register_exception_handlers(app)` 与 `request_context_middleware`。
+- 非流式接口：统一返回 `success/done/request_id/code/message/detail` 结构，便于前端稳定消费。
+- 流式接口：SSE 异常时输出 `x_error`，随后发送 `finish_reason=stop` 与 `[DONE]`，保证前端不假死。
+- 可观测性：响应头统一写入 `X-Request-Id`、`X-Request-Complete`，便于链路追踪与排障。
 
 ---
 
@@ -106,6 +128,7 @@
   - 可通过 `include_image_summary=true` 查看图像摘要层
 - `GET /api/memory/images`
 - `GET /api/memory/images/query`
+- `GET /api/conversations/recent?user_id={user_id}&limit=5`：页面刷新加载最近会话（短期会话存储）
 
 ### 3.3 配置接口
 
@@ -182,12 +205,12 @@ python tests/run_all.py
 
 - [ ] **鉴权与身份体系重构**
   - 现状：前后端仍可通过显式 `user_id/dept_id` 传参驱动数据读取。
-  - 风险：存在越权与跨租户数据泄漏风险。
+  - 风险：存在越权与跨部门数据泄漏风险。
   - 目标：改为 JWT + 网关/中间件注入身份，前端不再直接控制身份字段。
 
-- [ ] **统一租户隔离策略**
+- [ ] **统一部门隔离策略**
   - 现状：多个接口已有 ACL，但策略定义分散。
-  - 目标：抽象统一的租户/可见性策略层，避免“接口级漏校验”。
+  - 目标：抽象统一的部门/可见性策略层，避免“接口级漏校验”。
 
 - [ ] **关键路径审计日志**
   - 目标：记录谁在何时读取/写入了哪些记忆对象，满足安全审计需求。
