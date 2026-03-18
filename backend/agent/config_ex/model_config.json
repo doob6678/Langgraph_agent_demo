@@ -1,0 +1,8 @@
+{
+  "llm": {
+    "provider": "openai_compatible",
+    "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+    "base_model": "doubao-seed-2-0-lite-260215",
+    "api_key_env": "BASE_API_KEY"
+  }
+}

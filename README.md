@@ -1,156 +1,234 @@
+# LangGraph Smith 多模态记忆 Agent
 
-# 项目总结
+本项目是一个面向企业级 RAG/Agent 场景的后端与前端一体化示例，核心能力包括：
 
-本项目是一个基于 LangGraph 的 Agent 服务端，围绕“图片语义检索 + 联网搜索 +（可选）网页抓取阅读”三类能力，提供一个可直接用 FastAPI 启动的对话 API。核心目标是把多工具编排、默认参数与边界检查、失败回退链路、以及可重复验证的脚本测试固化下来，方便后续扩展更多检索源与工具。
+- 对话式 Agent（流式输出、工具编排）
+- 多模态能力（图像分析、图搜图）
+- 长短期记忆（会话上下文 + 长期事实 + 图像记忆）
+- 联网搜索与网页阅读（多搜索源回退）
+- 可观测的工具执行事件流（前端实时展示）
 
-# 技术选型
+项目目标是提供一套可运行、可扩展、可验证的参考实现，便于后续继续扩展为生产架构。
 
-## 框架与服务
+---
 
-- Web 框架：FastAPI（`backend/main_real.py`）
-- Agent 编排：LangGraph（`backend/agent/graph_new_real.py`）
-- LLM 接入：OpenAI SDK 兼容 Ark Base URL（`backend/agent/graph_new_real.py`）
-- 向量数据库：Milvus（`backend/services/milvus_service.py`）
-- 多模态编码：CLIP（ModelScope 模型加载，`backend/services/clip_service_local.py`）
-- 联网搜索：优先使用 Ark 内置 `web_search`，不可用时回退到 Metaso MCP 或 DDG/Bing（`backend/services/search_service.py`）
-- 网页阅读：使用 Metaso MCP `metaso_web_reader`（`backend/services/search_service.py`、`backend/agent/graph_new_real.py`）
+## 1. 项目完整功能（当前已实现）
 
-## 依赖管理
+### 1.1 对话与工具编排
 
-- Python 依赖：`requirements.txt`
-- 环境变量：`.env`
+- 基于 FastAPI 提供统一接口，默认支持 SSE 流式响应。
+- 基于 LangGraph 状态机实现 Agent 节点、工具执行节点、记忆召回/存储节点的协作。
+- 支持工具调用事件实时回传：`x_tool_event`、最终汇总事件 `x_final`。
 
-# 关键问题与解决思路
+### 1.2 多模态能力
 
-## 1. 方舟联网搜索未开通/未激活
+- 支持用户上传图片参与对话。
+- 使用本地 CLIP 模型做图像特征提取。
+- 支持以图搜图、图文混合检索结果生成。
+- 前端对 Markdown 图片语法做容错修复，降低模型输出格式不稳定带来的渲染失败。
 
-现象：Ark 调用 `tools: web_search` 返回 `ToolNotOpen` 或类似错误。  
-处理：`SearchService.search_web_sync()` 内做模式切换与回退链路，默认 `ark`，失败后按条件回退到 `metaso_mcp` 或本地 `ddg/bing`。
-注意，目前应该不开放给个人用户，申请开通不通过
+### 1.3 记忆系统（分层存储）
 
-## 2. 搜索结果相关性与可用性
+- **短期记忆（Context）**：保存近期对话窗口，支持上下文连续性。
+- **长期记忆（Long-term）**：支持结构化事实持久化（Milvus + MySQL 扩展文本）。
+- **图像记忆（Images）**：独立图像集合存储与查询，支持 ACL 可见性控制。
+- 新增并落地记忆分层元数据：`metadata.type`，当前已区分：
+  - `fact`：事实层
+  - `conversation`：对话摘要层
+  - `image_summary`：图像摘要层
+- Facts 页面默认仅展示事实层，避免图像摘要重复混入。
 
-现象：某些搜索源可能返回泛化结果。  
-处理：在 `search_service.py` 增加基于 query 的轻量过滤 `_filter_results_by_query()`，并对结果做去重与上限控制（`max_results` 统一约束到 1–50）。
+### 1.4 搜索与网页阅读
 
-## 3. 网页详情获取（抓取/阅读）
+- 联网搜索支持多模式：
+  - `ark`
+  - `metaso`
+  - `ddg`
+  - `bing`
+- 搜索失败可按策略回退（受 `WEB_SEARCH_STRICT` 控制）。
+- 支持网页正文读取与截断、并发控制、异常兜底。
 
-目的：当搜索摘要不足以支撑回答时，需要对指定链接进一步读取正文。  
-处理：引入 Metaso MCP 的 `metaso_web_reader`，在 `SearchService.read_webpage_sync()` 封装 URL 校验、超时控制、长度截断等边界保护；在 Agent 增加 `web_read` 工具供模型按需调用。
+### 1.5 前端体验
 
-# 流程设计
+- Chat 流式打字机渲染。
+- 工具调用过程可视化（执行中/完成/结果预览）。
+- 记忆侧边栏三分区：
+  - Context
+  - Facts
+  - Images
+- 修复并增强了记忆面板加载逻辑：
+  - Facts 与 Images 使用独立缓存身份键，避免互相影响
+  - 身份切换自动刷新对应面板
 
-## 请求到响应（主链路）
+### 1.6 可测试性与回归
 
-- 用户请求进入 `POST /api/chat`（`backend/main_real.py`）
-- 构造 `AgentState`（包含 `use_rag`、`use_search`、`top_k` 等开关）
-- LangGraph 运行：
-  - `agent_node()`：决定是否调用工具
-  - `process_tool_results()`：执行工具（`rag_image_search` / `web_search` / `web_read` / `analyze_image`），写回 `state.images` / `state.search_results` / `state.tool_results`
-  - 直到模型给出最终回答
-- 返回结构化 JSON：`response`、`images`、`search_results`、`timing`、`metadata`
+- 提供统一测试入口 `tests/run_all.py`。
+- 支持自动拉起服务或复用外部运行服务（`--no-server`）。
+- 支持按能力开关跳过特定测试（如 CLIP、Milvus 调试）。
 
-## 联网搜索回退链路
+---
 
-- `WEB_SEARCH_MODE=ark`：优先 Ark 内置联网搜索；失败且 `WEB_SEARCH_STRICT!=1` 时回退
-- `WEB_SEARCH_MODE=metaso`：优先 Metaso MCP；失败回退 DDG/Bing
-- `WEB_SEARCH_MODE=ddg` / `bing`：强制使用对应源
+## 2. 核心架构与分层
 
-# 使用说明
+### 2.1 技术栈
 
-## 1. 启动服务
+- Web 框架：FastAPI
+- Agent 编排：LangGraph
+- 模型接入：OpenAI Compatible API
+- 向量数据库：Milvus
+- 关系存储：MySQL（长文本扩展）
+- 多模态模型：CLIP（本地）
+- 前端：原生 JS + SSE 流式解析
 
-在项目根目录（`Langgraph_smith`）执行：
+### 2.2 关键模块
 
-`python -m uvicorn backend.main_real:app --host 127.0.0.1 --port 8000`
+- `backend/main_real.py`：API 入口、配置接口、记忆查询接口
+- `backend/agent/memory_ex/*`：短期/长期/图像记忆与统一管理器
+- `backend/agent/tool_ex/*`：工具策略与执行上下文
+- `backend/agent/stream_ex/*`：SSE 事件流封装与输出
+- `frontend/js/script.js`：聊天流渲染、工具状态展示
+- `frontend/js/memory_ui.js`：记忆面板（Context/Facts/Images）
 
-接口：
+---
 
-- `GET /`：加载 `frontend/index.html`
-- `POST /api/chat`：表单字段 `text/use_rag/use_search/top_k`，可选 `image`
-- `GET /api/config`：读取当前 Ark 配置与模式（仅进程内）
-- `POST /api/config`：设置 Ark 配置与模式（仅进程内）
+## 3. 关键接口（当前可用）
 
-# 流式输出（默认）
+### 3.1 对话接口
 
-`POST /api/chat` 默认开启 `stream=true`，以 SSE（`text/event-stream`）返回，且单条 `data:` 负载遵循 OpenAI `chat.completion.chunk` 结构（便于前端通用解析与兼容）。
+- `POST /api/chat`
+  - 参数：`text/use_rag/use_search/top_k/stream`，可选 `image`
+  - 返回：SSE 事件流（默认）或最终结果
 
-## 1. 事件格式
+### 3.2 记忆接口
 
-- 内容增量：`choices[0].delta.content`（字符串片段）
-- 工具调用增量：`choices[0].delta.tool_calls`（数组，支持分片拼接 arguments）
-- 工具执行事件：`x_tool_event`（用于前端实时展示“调用了哪些工具/耗时/结果预览”）
-- 最终汇总：`x_final`（包含最终 `response/images/search_results/timing/metadata`）
-- 结束标记：`data: [DONE]`
+- `GET /api/memory/facts`
+  - 默认返回 `fact` 层
+  - 可通过 `include_image_summary=true` 查看图像摘要层
+- `GET /api/memory/images`
+- `GET /api/memory/images/query`
 
-## 2. 前端展示策略
+### 3.3 配置接口
 
-`frontend/index.html` 使用 `fetch` + `ReadableStream` 逐行解析 SSE：
+- `GET /api/config`
+- `POST /api/config`
 
-- 逐步拼接 `delta.content` 为 Markdown 源文本，并用 `requestAnimationFrame` 节流渲染，避免页面卡死
-- 实时展示中间状态与工具调用（折叠/展开式交互）：
-  - 动态创建 `thoughts-container`，用于收纳大语言模型最终回答前的中间输出（思考过程）和工具调用执行细节
-  - 实时显示正在使用的工具及其具体参数（如 `web_search (query: "...")`）
-  - 工具调用完成时，动态展示结果预览（如搜索到的图片直接展示为小缩略图，并支持点击放大）
-  - 流式输出结束时，自动折叠思考过程区域，使用户焦点回到最终生成的回答上，用户亦可随时点击头部展开查看过程
-  - `tool_calls`：模型计划调用的工具与参数（OpenAI tool_calls 结构）
-  - `x_tool_event`：每次工具执行的 `ok/elapsed_s/result_preview`
-  - `usage`：`prompt_tokens/completion_tokens/total_tokens`（若上游不提供则后端估算并在最终事件返回）
+---
 
-## 4. 图搜图与Markdown图片渲染（新增功能）
+## 4. 分层存储实现说明（最新）
 
-- **图搜图（Image to Image Search）**：用户上传图片后，系统会自动调用 `analyze_image` 提取 CLIP 图像特征，并结合 `rag_image_search` 工具在 Milvus 向量库中检索相似图片，并根据特征提供准确的文本描述和推荐。整个过程支持流式实时反馈。
-- **严格图片渲染与格式修复**：
-  - **后端限定**：系统提示词严格要求大模型输出 `![图片名称](图片完整名称.png)` 格式。
-  - **前端容错修复**：由于大语言模型在输出 markdown 格式时常存在格式不稳定问题（如缺失右括号 `)`、图片名带多余空格、或缺失 `.png/.jpg` 后缀），前端的 `script.js` 增加了正则容错修复逻辑。在向 `marked.js` 渲染前，统一修复为标准 Markdown 图片格式，确保页面正常展示不出现“残缺括号”等排版错乱。
+本项目已完成“事实层与图像摘要层拆分”的主流程改造：
 
-## 3. 本地验证
+- 写入阶段：
+  - 普通事实写入 `type=fact`
+  - 图像伴随摘要写入 `type=image_summary`
+- 查询阶段：
+  - Facts 接口默认过滤到 `type=fact`
+  - 召回阶段默认排除 `image_summary`，减少上下文噪声
+- 展示阶段：
+  - Facts 面板同时过滤列表数据与流式事件中的 `image_summary`
 
-已在 `tests/run_all.py` 增加流式端到端校验：
+这套设计解决了“Facts 与 Images 内容重复展示”的核心问题，并为后续分层检索策略扩展预留了稳定入口。
 
-- 基础流式：断言能收到内容增量与最终 `x_final`
-- LLM + 工具整合（有有效 `ARK_API_KEY` 且非 `rule_based`）：断言收到 `x_tool_event` 后仍能继续收到内容增量（即“模型结合工具结果后的输出”）
+---
 
-## 2. 环境变量（建议写入 .env）
+## 5. 本地运行
 
-- `ARK_API_KEY`：方舟 API Key
-- `ARK_BASE_URL` / `ARK_API_BASE_URL`：方舟 API Base URL
-- `ARK_WEB_SEARCH_MODEL`：用于联网搜索的模型名
-- `WEB_SEARCH_MODE`：`ark|metaso|ddg|bing`
-- `WEB_SEARCH_STRICT`：`1` 时搜索失败直接抛错，不回退
-- `METASO_API_KEY`：Metaso MCP Key
-- `METASO_MCP_URL`：默认 `https://metaso.cn/api/mcp`
-- `METASO_SEARCH_SCOPE`：默认 `webpage`
-- `WEB_READ_MAX_CHARS`：网页读取截断长度
-- `WEB_READ_MAX_URLS`：批量抓取的最大 URL 数
-- `WEB_READ_CONCURRENCY`：批量抓取并发数
-- `WEB_SEARCH_FETCH_ALL`：`1` 时在 Agent web_search 后并行抓取全部链接正文并附加到结果
+在项目根目录执行：
 
-补充：如果不希望把 Key 写入文件，可通过前端页面的“🔑 大模型配置”面板或直接调用 `POST /api/config` 在进程内设置 `ARK_API_KEY/ARK_BASE_URL/ARK_MODEL`。
+```bash
+python -m uvicorn backend.main_real:app --host 127.0.0.1 --port 8000
+```
 
-## 3. 统一测试与调试入口
+访问：
 
-已将原先散落的 `debug_*.py` / `test_*.py` 归档合并为：
+- `http://127.0.0.1:8000/`
 
-- `tests/run_all.py`
+---
 
-执行（默认会自动拉起并关闭服务）：
+## 6. 测试与验证
 
-`python tests/run_all.py`
+统一测试入口：
+
+```bash
+python tests/run_all.py
+```
 
 常用参数：
 
-- `python tests/run_all.py --no-server`：不启动服务（用于你已手动启动的情况）
-- `python tests/run_all.py --web-search-mode metaso`：指定联网搜索模式
-- `python tests/run_all.py --fetch-all`：开启搜索后批量抓取正文
-- `python tests/run_all.py --skip-clip`：跳过 CLIP 编码用例
-- `python tests/run_all.py --skip-milvus-debug`：跳过 Milvus 直接调试用例
+- `--no-server`：复用已启动服务
+- `--web-search-mode metaso`：指定搜索模式
+- `--fetch-all`：搜索后抓取全部网页正文
+- `--skip-clip`：跳过 CLIP 相关用例
+- `--skip-milvus-debug`：跳过 Milvus 调试用例
 
-# 目录结构（主文件）
+---
 
-- `backend/main_real.py`：FastAPI 入口（主入口）
-- `backend/agent/graph_new_real.py`：LangGraph Agent 图、工具定义、工具执行逻辑
-- `backend/services/milvus_service.py`：Milvus 连接与图片检索
-- `backend/services/search_service.py`：联网搜索与网页阅读（Ark/Metaso/DDG/Bing）
-- `backend/services/clip_service_local.py`：CLIP 编码与模型信息
-- `tests/run_all.py`：统一测试与调试入口
+## 7. 环境变量（建议）
+
+- `BASE_API_KEY`、`BASE_URL`、`BASE_MODEL`、`BASE_PROVIDER`
+- `WEB_SEARCH_MODE`、`WEB_SEARCH_STRICT`
+- `METASO_API_KEY`、`METASO_MCP_URL`、`METASO_SEARCH_SCOPE`
+- `WEB_READ_MAX_CHARS`、`WEB_READ_MAX_URLS`、`WEB_READ_CONCURRENCY`
+- `WEB_SEARCH_FETCH_ALL`
+- `IMAGE_MEMORY_COLLECTION`
+
+---
+
+## 8. 待开发问题与演进路线
+
+以下是当前建议优先级最高的待开发事项：
+
+### P0（高优先级，生产阻断）
+
+- [ ] **鉴权与身份体系重构**
+  - 现状：前后端仍可通过显式 `user_id/dept_id` 传参驱动数据读取。
+  - 风险：存在越权与跨租户数据泄漏风险。
+  - 目标：改为 JWT + 网关/中间件注入身份，前端不再直接控制身份字段。
+
+- [ ] **统一租户隔离策略**
+  - 现状：多个接口已有 ACL，但策略定义分散。
+  - 目标：抽象统一的租户/可见性策略层，避免“接口级漏校验”。
+
+- [ ] **关键路径审计日志**
+  - 目标：记录谁在何时读取/写入了哪些记忆对象，满足安全审计需求。
+
+### P1（重要，质量与可维护性）
+
+- [ ] **记忆生命周期管理**
+  - 增加 TTL、归档、软删除、批量清理、冷热分层。
+
+- [ ] **分层检索策略可配置化**
+  - 支持按场景动态组合 `fact/conversation/image_summary`，并支持权重调度。
+
+- [ ] **前后端契约与接口文档**
+  - 补齐 OpenAPI + 示例请求/响应 + 错误码手册。
+
+- [ ] **CI 自动化质量门禁**
+  - 增加 PR 级别的单测、静态检查、基础冒烟。
+
+### P2（增强项）
+
+- [ ] **监控与告警**
+  - 增加 Prometheus 指标、链路追踪、慢查询观测。
+
+- [ ] **多模型路由与降级**
+  - 支持不同模型按任务类型路由，并具备自动降级策略。
+
+- [ ] **管理后台**
+  - 记忆检索、纠错、人工标注、策略热更新。
+
+---
+
+## 9. 已知限制
+
+- 部分联网搜索能力依赖外部服务开通状态，不同环境可用性存在差异。
+- 本地 CLIP 与向量检索对机器资源有一定要求。
+- 当前以“工程样例 + 可运行闭环”为主，距离严格生产形态仍需完成 P0/P1 改造。
+
+---
+
+## 10. 相关文档
+
+- 问题与解决记录：`docs/memory/troubleshooting_and_solutions.md`
+- 用户与会话隔离设计：`docs/memory/user_session_isolation.md`
+- 设计文档目录：`docs/`

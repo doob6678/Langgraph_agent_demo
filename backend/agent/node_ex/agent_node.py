@@ -1,19 +1,20 @@
 import json
-import os
 import time
 from typing import Any, Dict, List
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from backend.agent.config_ex.model_config import get_runtime_model_settings
 from backend.agent.state_ex.agent_state import AgentState
-from backend.agent.tool_ex.tools import analyze_image, rag_image_search, web_read, web_search
+from backend.agent.tool_ex.tools import analyze_image, rag_image_search, save_user_fact, web_read, web_search
 from backend.agent.util_ex.common import coerce_top_k, get_langchain_chat_model, to_lc_message
 
 
 def agent_node(state: AgentState) -> AgentState:
     start_time = time.time()
     try:
-        api_key = (os.getenv("ARK_API_KEY") or "").strip()
+        model_settings = get_runtime_model_settings()
+        api_key = (model_settings.get("api_key") or "").strip()
         if not api_key:
             if state.timing is None:
                 state.timing = {}
@@ -123,6 +124,9 @@ def agent_node(state: AgentState) -> AgentState:
 4. analyze_image: 分析图片内容（使用CLIP模型）
    - 参数: image_data_base64 (str), description (str)
 
+5. save_user_fact: 保存用户长期事实记忆
+   - 参数: fact (str), visibility (private|department), dept_id (str)
+
 使用规则：
 - 根据用户需求选择合适的工具
 - 可以组合使用多个工具
@@ -141,6 +145,11 @@ def agent_node(state: AgentState) -> AgentState:
             tools.append(web_read)
         if state.image_data:
             tools.append(analyze_image)
+        tools.append(save_user_fact)
+
+        # 注入记忆上下文
+        if getattr(state, "memory_context", ""):
+            system_prompt += f"\n\n【相关记忆上下文】\n{state.memory_context}\n请参考以上记忆回答用户问题，如果记忆中有相关信息，请优先使用。"
 
         lc_messages: List[Any] = [SystemMessage(content=system_prompt)]
         if state.messages:
@@ -153,7 +162,7 @@ def agent_node(state: AgentState) -> AgentState:
             lc_messages.append(HumanMessage(content=user_content))
 
         llm = get_langchain_chat_model(
-            (os.getenv("ARK_MODEL") or os.getenv("ARK_MODEL_NAME") or "doubao-seed-2-0-lite-260215").strip() or "doubao-seed-2-0-lite-260215",
+            (model_settings.get("base_model") or "").strip() or "doubao-seed-2-0-lite-260215",
             temperature=0.7,
             max_tokens=1000,
             streaming=False,
@@ -215,7 +224,7 @@ def agent_node(state: AgentState) -> AgentState:
             state.needs_tool = False
 
         state.timing["agent_time"] = time.time() - start_time
-        state.metadata["model"] = os.getenv("ARK_MODEL_NAME", "doubao-seed-2-0-lite-260215")
+        state.metadata["model"] = (model_settings.get("base_model") or "doubao-seed-2-0-lite-260215")
         return state
     except Exception as e:
         state.answer = f"处理请求时出错: {str(e)}"

@@ -412,7 +412,7 @@ class SearchService:
         self.timeout = int(os.getenv("SEARCH_TIMEOUT", "10"))
 
     def _ark_base_url(self) -> str:
-        base = (os.getenv("ARK_BASE_URL") or os.getenv("ARK_API_BASE_URL") or "").strip()
+        base = (os.getenv("BASE_URL") or os.getenv("ARK_BASE_URL") or os.getenv("ARK_API_BASE_URL") or "").strip()
         if not base:
             base = "https://ark.cn-beijing.volces.com/api/v3"
         base = base.rstrip("/")
@@ -431,12 +431,12 @@ class SearchService:
     def _ark_web_search_model(self) -> str:
         return (
             (os.getenv("ARK_WEB_SEARCH_MODEL") or "").strip()
-            or (os.getenv("ARK_MODEL") or os.getenv("ARK_MODEL_NAME") or "").strip()
+            or (os.getenv("BASE_MODEL") or os.getenv("ARK_MODEL") or os.getenv("ARK_MODEL_NAME") or "").strip()
             or "doubao-seed-1-6-250615"
         )
 
     def _ark_api_key(self) -> str:
-        return (os.getenv("ARK_API_KEY") or "").strip()
+        return (os.getenv("BASE_API_KEY") or os.getenv("ARK_API_KEY") or "").strip()
 
     def _search_web_ark(self, query: str, max_results: int) -> List[Dict[str, Any]]:
         q = (query or "").strip()
@@ -455,7 +455,7 @@ class SearchService:
 
         api_key = self._ark_api_key()
         if not api_key:
-            raise RuntimeError("missing ARK_API_KEY")
+            raise RuntimeError("missing BASE_API_KEY")
 
         base_url = self._ark_base_url()
         url = f"{base_url}/responses"
@@ -588,7 +588,7 @@ class SearchService:
                 if strict:
                     raise
                 msg = str(e)
-                if "ToolNotOpen" in msg or "not activated web search" in msg or "missing ARK_API_KEY" in msg:
+                if "ToolNotOpen" in msg or "not activated web search" in msg or "missing BASE_API_KEY" in msg:
                     try:
                         if (os.getenv("METASO_API_KEY") or "").strip():
                             return _metaso_mcp_web_search_sync(q, k, self.timeout)
@@ -709,7 +709,7 @@ class SearchService:
                 if strict:
                     raise
                 msg = str(e)
-                if "ToolNotOpen" in msg or "not activated web search" in msg or "missing ARK_API_KEY" in msg:
+                if "ToolNotOpen" in msg or "not activated web search" in msg or "missing BASE_API_KEY" in msg:
                     try:
                         if (os.getenv("METASO_API_KEY") or "").strip():
                             return await asyncio.to_thread(_metaso_mcp_web_search_sync, q, max_results, self.timeout)
