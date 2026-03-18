@@ -1,13 +1,13 @@
 # 用户与会话隔离机制设计 (User & Session Isolation)
 
-在具备记忆增强能力的 Agent 系统中，如何准确识别用户并保证多用户、多会话之间的数据隔离是核心挑战。本项目采用基于 **`user_id`** 和 **`tenant_id` (租户/部门ID)** 的双重隔离机制。
+在具备记忆增强能力的 Agent 系统中，如何准确识别用户并保证多用户、多会话之间的数据隔离是核心挑战。本项目采用基于 **`user_id`** 和 **`dept_id` (部门ID)** 的双重隔离机制。
 
 ## 1. 标识传递与兜底机制
 
 系统通过前端发起的 API 请求携带标识符，以此作为后续所有操作的基础依据。
 
 ### 1.1 前端传递
-在前端发起聊天请求时（`POST /api/chat`），通过 `FormData` 显式传递 `user_id` 和 `tenant_id`。
+在前端发起聊天请求时（`POST /api/chat`），通过 `FormData` 显式传递 `user_id` 和 `dept_id`。
 *   **开发联调状态**：为了方便测试跨刷新、跨会话的记忆持久化，前端 `script.js` 中通常会固定写入一个测试标识：
     ```javascript
     // frontend/js/script.js
@@ -28,10 +28,10 @@ if not user_id:
 
 后端接收到标识后，会通过 `MemoryManagerFactory` 进行分发与隔离处理。
 
-### 2.1 租户隔离 (Tenant Isolation)
-系统原生支持多租户（或部门）架构：
-*   `MemoryManagerFactory` 为每个 `tenant_id` 维护独立的 `MemoryManager` 单例实例。
-*   在真实业务场景中，不同租户的数据库表前缀、向量库 Collection 或 Partition 可以完全物理/逻辑隔离。
+### 2.1 部门隔离 (Department Isolation)
+系统原生支持多部门隔离架构：
+*   `MemoryManagerFactory` 为每个 `dept_id` 维护独立的 `MemoryManager` 单例实例。
+*   在真实业务场景中，不同部门的数据库表前缀、向量库 Collection 或 Partition 可以完全物理/逻辑隔离。
 
 ### 2.2 用户隔离 (User Isolation)
 在 `MemoryManager` 内部，所有底层存储的增删改查操作都强制绑定 `user_id`。
@@ -61,4 +61,5 @@ if not user_id:
 
 目前的机制设计已能跑通核心流程。在未来推向生产环境时，建议进行如下安全加固：
 1.  **禁止前端明文传递 `user_id`**：前端只需传递登录凭证（如 JWT Token）。
-2.  **API 网关解析**：由 API 网关或后端的鉴权中间件拦截请求，解析 Token 提取出真实的 `user_id` 和 `tenant_id`，再注入到后续的业务逻辑和 LangGraph 状态机中，防止用户伪造 ID 越权访问他人记忆。
+2.  **API 网关解析**：由 API 网关或后端的鉴权中间件拦截请求，解析 Token 提取出真实的 `user_id` 和 `dept_id`，再注入到后续的业务逻辑和 LangGraph 状态机中，防止用户伪造 ID 越权访问他人记忆。
+3.  **统一字段治理**：前后端字段命名统一为 `dept_id`，避免接口联调歧义。

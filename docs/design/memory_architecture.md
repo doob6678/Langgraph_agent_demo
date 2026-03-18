@@ -74,7 +74,6 @@ Collection 名称: `agent_image_memory`
 | 字段名 | 类型 | 维度/长度 | 描述 | 索引/备注 |
 | :--- | :--- | :--- | :--- | :--- |
 | `id` | VARCHAR | 64 | 唯一主键 (UUID) | Primary Key |
-| `tenant_id` | VARCHAR | 64 | 租户ID | 过滤核心 |
 | `dept_id` | VARCHAR | 64 | **部门ID** | Partition Key / 过滤核心 |
 | `user_id` | VARCHAR | 64 | **用户ID** | 过滤核心 |
 | `visibility` | VARCHAR | 20 | `private/department` | 权限过滤 |

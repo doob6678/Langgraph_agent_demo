@@ -52,7 +52,7 @@ async def execute_tool_call_into_state(state: AgentState, tool_call: Any) -> Dic
         save_user_image_invoke=save_user_image.ainvoke,
         coerce_top_k=coerce_top_k,
         getenv=os.getenv,
-    )
+    )   
     return await _tool_executor.execute_tool_call_into_state(
         state,
         tool_call,

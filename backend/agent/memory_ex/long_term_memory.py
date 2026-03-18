@@ -6,8 +6,6 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 from .base_memory import BaseMemory
-from .database import SessionLocal, engine
-from .models import MemoryContent, Base, migrate_memory_contents_schema
 from .embedding import LocalEmbedding
 
 # 尝试导入 pymilvus
@@ -16,13 +14,9 @@ try:
     MILVUS_AVAILABLE = True
 except ImportError:
     MILVUS_AVAILABLE = False
-    logging.warning("pymilvus 尚未安装或导入失败，长期记忆将仅支持 MySQL 存储功能或 Mock 模式。")
+    logging.warning("pymilvus 尚未安装或导入失败，长期记忆仅支持降级模式。")
 
 logger = logging.getLogger(__name__)
-
-# 确保在首次运行时创建数据库表结构
-Base.metadata.create_all(bind=engine)
-migrate_memory_contents_schema(engine)
 
 class LongTermMemory(BaseMemory):
     """
@@ -30,12 +24,13 @@ class LongTermMemory(BaseMemory):
     职责：
     - 存储用户画像、历史事实、重要知识点。
     - 基于语义向量（Embedding）进行相关性检索（使用Milvus）。
-    - 处理超大文本（>8000字符），对接MySQL扩展表 `memory_contents`。
     
     设计考量：
-    - 混合存储策略（Hybrid Storage）：长文本存MySQL，摘要/向量存Milvus。
+    - 长期记忆统一存储于 Milvus，避免多存储分流复杂性。
+    - 单条记忆长度限制 1024 字符，超出后自动截断。
     - 数据隔离：按部门/用户/可见性进行权限隔离。
     """
+    MAX_CONTENT_LENGTH = 1024
     
     def __init__(self, embedding_model: Optional[LocalEmbedding] = None):
         """
@@ -115,7 +110,7 @@ class LongTermMemory(BaseMemory):
                     FieldSchema(name="user_id", dtype=DataType.VARCHAR, max_length=64, description="User ID"),
                     FieldSchema(name="dept_id", dtype=DataType.VARCHAR, max_length=64, description="Department ID"), # 新增
                     FieldSchema(name="visibility", dtype=DataType.VARCHAR, max_length=20, description="Visibility (private/department)"), # 新增
-                    FieldSchema(name="has_ext", dtype=DataType.BOOL, description="Has extended content in MySQL"),
+                    FieldSchema(name="has_ext", dtype=DataType.BOOL, description="Reserved compatibility flag"),
                     FieldSchema(name="metadata", dtype=DataType.JSON, description="Metadata"),
                     FieldSchema(name="created_at", dtype=DataType.VARCHAR, max_length=32, description="Created At Datetime"),
                     FieldSchema(name="updated_at", dtype=DataType.VARCHAR, max_length=32, description="Updated At Datetime"),
@@ -168,7 +163,6 @@ class LongTermMemory(BaseMemory):
     async def add_memory(self, user_id: str, content: str, dept_id: str = "default_dept", metadata: Optional[Dict[str, Any]] = None) -> str:
         """
         添加长期记忆。
-        实现混合存储策略：当文本超长时存MySQL，短文本/摘要存入Milvus。
         """
         if not user_id or not content:
             raise ValueError("参数 user_id 和 content 不能为空")
@@ -182,41 +176,19 @@ class LongTermMemory(BaseMemory):
         
         # 生成唯一记忆ID
         mem_id = f"ltm_{int(time.time() * 1000)}"
-        has_ext = False
-        summary_content = content
+        normalized_content = str(content).strip()
+        if len(normalized_content) > self.MAX_CONTENT_LENGTH:
+            logger.info(
+                f"长期记忆长度超限，已截断: original={len(normalized_content)}, max={self.MAX_CONTENT_LENGTH}"
+            )
+            normalized_content = normalized_content[: self.MAX_CONTENT_LENGTH]
         
         try:
-            # 模拟超长文本存储逻辑 (这里我们把阈值调小一点以便测试，比如 > 50 个字符就存 MySQL)
-            if len(content) > 50:
-                logger.info(f"触发长文本存储 (长度 {len(content)}), 写入 MySQL.")
-                has_ext = True
-                
-                # 1. 存入 MySQL 长文本表 (memory_contents)
-                db = SessionLocal()
-                try:
-                    new_mem = MemoryContent(
-                        id=mem_id,
-                        user_id=user_id,
-                        content=content
-                    )
-                    db.add(new_mem)
-                    db.commit()
-                except Exception as db_e:
-                    db.rollback()
-                    logger.error(f"写入 MySQL 失败: {str(db_e)}")
-                    raise
-                finally:
-                    db.close()
-                
-                # 2. 生成摘要 (此处简化为截取前50个字)
-                summary_content = f"[摘要] {content[:50]}..."
-            
-            # 3. 将摘要存入 Milvus
             if MILVUS_AVAILABLE and self.milvus_collection and self.embedding_model:
-                logger.info(f"向 Milvus 写入记忆: {summary_content[:20]}...")
+                logger.info(f"向 Milvus 写入记忆: {normalized_content[:20]}...")
                 
                 # 生成向量
-                embedding_vector = self.embedding_model.embed_query(summary_content)
+                embedding_vector = self.embedding_model.embed_query(normalized_content)
                 if not embedding_vector:
                     logger.warning("向量生成失败，跳过 Milvus 存储")
                     return mem_id
@@ -224,12 +196,12 @@ class LongTermMemory(BaseMemory):
                 # 构造插入数据
                 data = [
                     [mem_id],               # id
-                    [summary_content],      # content
+                    [normalized_content],   # content
                     [embedding_vector],     # embedding
                     [user_id],              # user_id
                     [dept_id],              # dept_id
                     [visibility],           # visibility
-                    [has_ext],              # has_ext
+                    [False],                # reserved compatibility flag
                     [metadata],             # metadata
                     [created_at],           # created_at
                     [updated_at],           # updated_at
@@ -272,10 +244,14 @@ class LongTermMemory(BaseMemory):
     ) -> List[Dict[str, Any]]:
         """
         根据查询语句（通常会被转为Embedding向量）检索相关长期记忆。
-        支持租户和用户级别的数据隔离查询。
+        支持部门和用户级别的数据隔离查询。
         """
         if not user_id or not query:
             raise ValueError("参数 user_id 和 query 不能为空")
+        if limit < 1:
+            limit = 1
+        if limit > 50:
+            limit = 50
             
         logger.info(f"正在检索与 '{query}' 相关的长期记忆, user_id: {user_id}, dept_id: {dept_id}")
         
@@ -289,8 +265,6 @@ class LongTermMemory(BaseMemory):
                     logger.warning("查询向量生成失败")
                     return []
                 
-                # 构建过滤表达式 (租户隔离已经在 collection 层面做了，这里做用户隔离)
-                # expr = f"user_id == '{user_id}'"
                 # 更新为支持可见性控制 (部门公开可见，或私有且归属本人)
                 expr = f"(visibility == 'department' and dept_id == '{dept_id}') or (visibility == 'private' and user_id == '{user_id}')"
                 
@@ -302,7 +276,7 @@ class LongTermMemory(BaseMemory):
                     param=search_params,
                     limit=limit,
                     expr=expr,
-                    output_fields=["content", "has_ext", "metadata", "id", "created_at", "updated_at"]
+                    output_fields=["content", "metadata", "id", "created_at", "updated_at"]
                 )
                 
                 # 处理结果
@@ -313,26 +287,9 @@ class LongTermMemory(BaseMemory):
                             "content": hit.entity.get("content"),
                             "metadata": hit.entity.get("metadata"),
                             "score": hit.score,
-                            "has_ext": hit.entity.get("has_ext"),
                             "created_at": self._format_datetime(hit.entity.get("created_at")),
                             "updated_at": self._format_datetime(hit.entity.get("updated_at")),
                         }
-                        
-                        # 如果有扩展内容，去 MySQL 查完整内容
-                        if item["has_ext"]:
-                            logger.info(f"检测到扩展内容，从 MySQL 加载完整文本: {item['id']}")
-                            db = SessionLocal()
-                            try:
-                                record = db.query(MemoryContent).filter(MemoryContent.id == item['id']).first()
-                                if record:
-                                    item["content"] = record.content # 替换为完整内容
-                                    if not isinstance(item["metadata"], dict):
-                                        item["metadata"] = {}
-                                    item["metadata"]["source"] = "mysql_full_text"
-                            except Exception as db_e:
-                                logger.error(f"MySQL 查询失败: {db_e}")
-                            finally:
-                                db.close()
                                 
                         if self._match_memory_type(item.get("metadata"), include_types=include_types, exclude_types=exclude_types):
                             results.append(item)
@@ -404,23 +361,14 @@ class LongTermMemory(BaseMemory):
 
     async def delete_memory(self, user_id: str, memory_id: str) -> bool:
         """
-        主动遗忘机制：删除长期记忆，需同时清理Milvus和MySQL。
+        主动遗忘机制：删除长期记忆（Milvus）。
         """
         if not user_id or not memory_id:
             return False
             
-        logger.info(f"从 MySQL 和 Milvus 删除记忆记录: {memory_id}")
-        
-        db = SessionLocal()
+        logger.info(f"从 Milvus 删除记忆记录: {memory_id}")
+
         try:
-            # 1. 清理 MySQL
-            record = db.query(MemoryContent).filter(MemoryContent.id == memory_id, MemoryContent.user_id == user_id).first()
-            if record:
-                db.delete(record)
-                db.commit()
-                logger.info(f"已从 MySQL 删除记录: {memory_id}")
-                
-            # 2. 清理 Milvus
             if MILVUS_AVAILABLE and self.milvus_collection:
                 expr = f"id == '{memory_id}'"
                 self.milvus_collection.delete(expr)
@@ -428,10 +376,7 @@ class LongTermMemory(BaseMemory):
                 logger.info(f"已从 Milvus 删除记录: {memory_id}")
                 
         except Exception as e:
-            db.rollback()
             logger.error(f"删除记忆失败: {str(e)}")
             return False
-        finally:
-            db.close()
             
         return True

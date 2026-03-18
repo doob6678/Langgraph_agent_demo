@@ -1,7 +1,7 @@
 # 记忆管理工作流与生命周期文档 (Memory Workflow & Lifecycle)
 
 ## 1. 概述
-本文档详细描述了记忆管理系统在 Agent 运行过程中的完整工作流程，包括记忆的形成、存储、召回、遗忘以及多租户权限控制的实现细节。
+本文档详细描述了记忆管理系统在 Agent 运行过程中的完整工作流程，包括记忆的形成、存储、召回、遗忘以及多部门权限控制的实现细节。
 
 ---
 
@@ -36,11 +36,11 @@
 ### 2.1 会话初始化 (Session Initialization)
 当用户发起新的请求 (`POST /api/chat`) 时：
 1.  **身份鉴权**:
-    *   API 网关解析 JWT Token，提取 `user_id` 和 `tenant_id` (部门ID)。
+    *   API 网关解析 JWT Token，提取 `user_id` 和 `dept_id` (部门ID)。
     *   校验用户是否属于该部门。
 2.  **状态加载 (State Loading)**:
     *   后端根据 `thread_id` 从 MySQL (`checkpoints` 表) 加载上一次的 `AgentState`。
-    *   如果是新会话，初始化空的 `AgentState`，并记录 `user_id` 和 `tenant_id` 到 `chat_threads` 表。
+    *   如果是新会话，初始化空的 `AgentState`，并记录 `user_id` 和 `dept_id` 到 `chat_threads` 表。
 
 ### 2.2 记忆召回 (Memory Recall) - *Before Execution*
 在 Agent 执行具体逻辑之前，`MemoryManager` 并行执行以下操作：
@@ -50,7 +50,7 @@
     *   **语义检索**: 使用当前用户输入 (Query) 生成 Embedding 向量。
     *   **权限过滤**: 在 Milvus 中执行混合查询：
         ```python
-        expr = f"tenant_id == {current_tenant} and (visibility == 'department' or (visibility == 'private' and user_id == {current_user}))"
+        expr = f"dept_id == '{current_dept}' and (visibility == 'department' or (visibility == 'private' and user_id == '{current_user}'))"
         results = milvus.search(vector, expr=expr, limit=5)
         ```
     *   **重排序 (Rerank)**: (可选) 对检索结果进行相关性重打分。
@@ -92,7 +92,7 @@ sequenceDiagram
     participant LLM as LLM Service
 
     U->>API: Send Message (thread_id)
-    API->>MM: Load Context (user_id, tenant_id)
+    API->>MM: Load Context (user_id, dept_id)
     
     par Parallel Recall
         MM->>DB: Load Short-Term History
@@ -137,14 +137,13 @@ async def save_long_term_memory(content: str, metadata: dict):
 Milvus 查询时的动态表达式构建：
 ```python
 def build_expr(user: User):
-    # 基础条件：必须在同一个租户/部门下
-    base_expr = f"tenant_id == {user.tenant_id}"
+    # 基础条件：必须在同一个部门下
+    base_expr = f"dept_id == '{user.dept_id}'"
     
     # 可见性条件：
     # 1. 部门公开 (visibility == 'department')
     # 2. 或者是用户自己的私有记忆 (visibility == 'private' && user_id == me)
     # 3. (可选) 全局公开 (visibility == 'public')
-    visibility_expr = f"(visibility == 'department' or (visibility == 'private' and user_id == {user.id}))"
-    
+    visibility_expr = f"(visibility == 'department' or (visibility == 'private' and user_id == '{user.id}'))"
     return f"{base_expr} and {visibility_expr}"
 ```

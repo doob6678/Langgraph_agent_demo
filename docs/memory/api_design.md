@@ -76,7 +76,7 @@
     {
       "content": "用户将在下周三去上海出差",
       "user_id": "user-123",
-      "tenant_id": 1001,      // (新增) 归属部门ID
+      "dept_id": "dept_1001", // (新增) 归属部门ID
       "visibility": "private", // (新增) 可见性: private/department/public
       "type": "fact",         // fact, preference, todo, etc.
       "source": "ai_extracted" // (新增) 来源: manual/ai_extracted
